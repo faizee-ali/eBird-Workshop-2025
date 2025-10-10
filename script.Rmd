@@ -1,0 +1,352 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Practice Thinking Questions
+
+1.  The participants are expected to download this data from the provided link, and explore the data set structure, distribution of sampling locations, and answer which area in Bangalore is the most popular for birding?
+
+2.  For a species of your choice in Bangalore create plots that demonstrate the seasonality of a species, or at least list down the steps required to do so.
+
+3.  For a given region find areas which are promising for conservation but do not show up as important on the hotspot map.
+
+4.  See how birder behavior and therefore the data is impacted by events such as COVID?
+
+5.  Create a graph of seasonality of Eastern Cattle Egret in Bangalore.
+
+    ### Import Data
+
+    ```{r}
+    library(tidyverse)
+    library(sf)
+    library(terra)
+    library(dplyr)
+    library(auk)
+    library(lubridate)
+
+    #The pipe operator |> and %>%
+
+    # Raw data files (huge files, don’t open in Excel!)
+    ebd_file <- "ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025.txt"
+    smp_file <- "ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025_sampling.txt"
+
+    ebd <- auk_ebd("ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025.txt", file_sampling = "ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025_sampling.txt")
+    ```
+
+<!-- -->
+
+1.  Explore the data set structure, distribution of sampling locations,
+
+    ```{r}
+
+    # looking at the data
+    ebd_data <- read.delim(file = "ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025.txt", sep = "\t")
+
+    ebd_sample <- read.delim(file = "ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025_sampling.txt", sep = "\t")
+    ```
+
+    (ii) Spatial distribution of sampling locations
+
+    ```{r}
+
+    library(mapview)
+    library(sf)
+
+    ebird_sf <- st_as_sf(
+      ebd_sample,
+      coords = c("LONGITUDE", "LATITUDE"),
+      crs = 4326   # WGS84 lat-long
+    )
+
+    # Quick interactive map
+    mapview(ebird_sf, 
+            cex = 2,             # point size
+            alpha = 0.6)  
+
+    ```
+
+2.  Answer which area in Bangalore is the most popular for birding?
+
+For this we have too many points and clutter in the map currently, so lets filter and re-visualise
+
+```{r}
+
+ebd <- auk_ebd("ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025.txt", file_sampling = "ebd_IN-KA-BN_202401_202412_smp_relAug-2025/ebd_IN-KA-BN_202401_202412_smp_relAug-2025_sampling.txt")
+
+ebd_filters <- ebd %>% 
+  auk_date(date = c("2020-06-01", "2025-06-30")) %>% 
+  # restrict to the standard traveling and stationary count protocols
+  auk_protocol(protocol = c("Stationary", "Traveling")) %>% 
+  auk_complete()
+ebd_filters
+
+#define the output file
+f_ebd <- file.path("results/ebd_filtered.txt")
+f_sampling <- file.path("results/ebd_filtered_sampling.txt")
+
+# only run if the files don't already exist
+if (!file.exists(f_ebd)) {
+  auk_filter(ebd_filters, file = f_ebd, file_sampling = f_sampling)
+}
+
+
+#Read into R as a dataframe
+ebd_filt_sam <- read.delim("results/ebd_filtered_sampling.txt", sep = "\t")
+# Convert to sf object
+ebd_sam_sf <- st_as_sf(
+  ebd_filt_sam,
+  coords = c("LONGITUDE", "LATITUDE"), # column names in your ebd_df
+  crs = 4326,                           # WGS84
+  remove = FALSE                        # keep lat/long columns
+)
+
+# Visualize with mapview again
+mapview(ebd_sam_sf, 
+        cex = 2,             # point size
+        alpha = 0.6) 
+st_write(ebd_sam_sf, dsn = "ebd_sam_sf.kml", driver = "KML")
+```
+
+Now we will use a grid based approach to understand the distribution
+
+```{r}
+# Reproject to India Albers Equal Area 
+ebd_sf_proj <- st_transform(ebd_sam_sf, 7755)   # EPSG:7755
+#also do it for sampling data
+
+# Make grid with 1 km cells
+grid <- st_make_grid(ebd_sf_proj, cellsize = 1000, square = TRUE)
+
+# Convert grid to sf
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+# Spatial join: assign points to grid cells
+joined <- st_join(ebd_sf_proj, grid_sf, join = st_within)
+
+# Count per grid cell
+grid_counts <- joined %>%
+  st_drop_geometry() %>%
+  count(grid_id, name = "checklist_count")
+
+# Add counts back to grid
+grid_sf <- left_join(grid_sf, grid_counts, by = "grid_id")
+
+# Replace NA with 0
+grid_sf$checklist_count[is.na(grid_sf$checklist_count)] <- 0
+
+library(ggplot2)
+
+ggplot(grid_sf) +
+  geom_sf(aes(fill = checklist_count), color = "grey30", size = 0.1) +
+  scale_fill_viridis_c(option = "plasma", trans = "sqrt") +
+  theme_minimal() +
+  labs(fill = "# Checklists", title = "eBird Checklists per Grid Cell")
+mapview(grid_sf, zcol = "checklist_count", legend = TRUE)
+
+st_write(grid_sf, "results/grid_counts.shp")
+
+# Now we visualize
+```
+
+**Now we will try to figure out the distribution of biodiversity**
+
+```{r}
+#read ebd
+ebd <- read_tsv("results/ebd_filtered.txt")
+# convert to sf and reproject 
+
+ebd_sf <- st_as_sf(
+  ebd,
+  coords = c("LONGITUDE", "LATITUDE"),
+  crs = 4326)
+
+ebd_sf_proj <- st_transform(ebd_sf, 7755)   # India Albers
+
+#Join points to grids
+joined <- st_join(ebd_sf_proj, grid_sf, join = st_within)
+
+## compute checklist richness per grid
+# Each checklist_id has multiple species entries, so count unique species
+checklist_richness <- joined %>%
+  st_drop_geometry() %>%
+  group_by(grid_id, `SAMPLING.EVENT.IDENTIFIER`) %>%
+  summarise(species_richness = n_distinct(`SCIENTIFIC.NAME`), .groups = "drop")
+
+# get the maximum richness per grid
+grid_richness <- checklist_richness %>%
+  group_by(grid_id) %>%
+  summarise(max_species = max(species_richness, na.rm = TRUE), .groups = "drop")
+
+# Add back to grid
+grid_sf <- left_join(grid_sf, grid_richness, by = "grid_id")
+
+# Replace NA with 0
+grid_sf$max_species[is.na(grid_sf$max_species)] <- 0
+
+## Plot the maximum species richness
+
+ggplot(grid_sf) +
+  geom_sf(aes(fill = max_species), color = "grey30", size = 0.1) +
+  scale_fill_viridis_c(option = "magma", trans = "sqrt") +
+  theme_minimal() +
+  labs(fill = "Max species per checklist",
+       title = "Maximum Species Reported per Grid Cell")
+mapview(grid_sf, zcol = "max_species", legend = TRUE)
+st_write(grid_sf, "results/grid_species_counts.shp")
+
+```
+
+```         
+```
+
+**Optional exercise:** For a species of your choice in Bangalore create plots that demonstrate the seasonality of a species, or at least list down the steps required to do so.
+
+Before we jump into seasonality we will perform spatial thinning
+
+Lets choose the species given - western
+
+```{r}
+
+install.packages("spThin")
+library(spThin)
+#extract localities
+locs <- select(ebd_filt_sam, LATITUDE, LONGITUDE, SAMPLING.EVENT.IDENTIFIER)
+thin(
+  loc.data = locs,
+  lat.col = "LATITUDE",
+  long.col = "LONGITUDE",
+  spec.col = "SAMPLING.EVENT.IDENTIFIER",
+  thin.par = 0.2,           # thinning distance in km
+  reps = 1,              # number of replicates
+  locs.thinned.list.return = TRUE,
+  write.files = FALSE,     # don’t save files automatically
+  verbose = TRUE
+)
+
+
+thinned <- thin(
+  loc.data = ebird_data,
+  lat.col = "latitude",
+  long.col = "longitude",
+  spec.col = "species",
+  thin.par = 0.2,
+  reps = 1,
+  locs.thinned.list.return = TRUE,
+  write.files = FALSE
+)
+
+#### alternate way ####
+
+# Set grid size
+gridsize <- 200  # in meters
+
+# 2. Create 200 m grid across the data range
+grid <- st_make_grid(ebd_sf_proj, cellsize = gridsize, what = "polygons")
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+# 5. Spatial join: assign each checklist to a grid cell
+ebird_joined <- st_join(ebd_sf_proj, grid_sf, join = st_intersects)
+
+# 6. Create unique site IDs using coordinate pairs
+ebird_joined$site_id <- paste0(round(st_coordinates(ebird_joined)[,1], 2), "_",
+                               round(st_coordinates(ebird_joined)[,2], 2))
+# 7. Count visits per site within each grid cell
+most_visited <- ebird_joined %>%
+    count(grid_id, site_id) %>%
+    group_by(grid_id) %>%
+    slice_max(n, with_ties = FALSE)
+# 8 Filter original data to retain only those sites
+background_bias <- ebird_joined %>%
+    filter(site_id %in% most_visited$site_id & grid_id %in% most_visited$grid_id) %>%
+    group_by(grid_id) %>%
+    slice(1) %>%
+    ungroup()
+
+# 9. Save to file (optional)
+st_write(background_bias, "thinned sampling.gpkg")
+background_bias_coords <- background_bias %>%
+    mutate(
+        longitude = st_coordinates(.)[, 1],
+        latitude = st_coordinates(.)[, 2]
+    ) %>%
+    st_drop_geometry()
+
+# Save as CSV
+write_tsv(background_bias, "results/thinnged_background_200m.txt")
+
+
+```
+
+3.  **Now generating seasonality of the species**
+
+    ```{r}
+    ### generating detection frequencies ###
+    #First we zerofill
+    ebd_filtered <- read_tsv("results/ebd_filtered.txt")
+    ebd_egret <- ebd_filtered %>% filter(`SCIENTIFIC NAME` == "Ardea coromanda")
+    write_tsv(ebd_egret, "results/ebd_egret.txt")
+    ebd_smp <- read_sampling("results/ebd_filtered_sampling.txt")
+    ebd_egret <- read_ebd("results/ebd_egret.txt")
+    ebd_egret <- filter(ebd_egret, checklist_id %in% ebd_smp$checklist_id)
+    ebd_zf <- auk_zerofill(ebd_egret, ebd_smp, collapse = TRUE)
+
+    write_tsv(ebd_zf, "results/egret_zf.txt")
+    #filter the species
+    # now split the date format into month and year
+    ebd_zf <- ebd_zf %>%
+      mutate(
+        year = year(observation_date),
+        month = month(observation_date),
+        day = day(observation_date)
+      )
+    # Group by month and species, calculate detections and total checklists
+    monthly_freq <- ebd_zf %>%
+        group_by(month) %>%
+        summarize(
+            total_detections = sum(species_observed),
+            total_checklists = n(),
+            frequency = total_detections / total_checklists
+        ) %>%
+        ungroup()
+    monthly_freq$perct <- monthly_freq$frequency*100
+    monthly_freq <- na.omit(monthly_freq)    
+        
+    # Plot the frequency of detections for each species
+    p<- ggplot(monthly_freq, aes(x = month, y = perct)) +
+        geom_line() +
+        geom_point() +
+        scale_x_continuous(breaks = seq(1, 12, by = 1), limits = c(1, 12)) +
+        labs(
+            title = "Frequency of Detections in %",
+            x = "Month",
+            y = "Frequency of Detections",
+            color = "Species"
+        )
+    plot(p)
+    ggsave(p, filename = paste0("cuce-detection", ".png"),
+           width = 8, height = 5, units = "in", dpi = 300)
+
+
+    ```
+
+We will finally, plot the presence absence distribution of the eastern cattle egret
+
+```{r}
+zf_egret_df <- st_as_sf(ebd_zf, coords = c("longitude", "latitude"), crs = 4326)
+
+mapview(zf_egret_df, zcol = "species_observed", col.regions = c("grey", "blue"), cex = 2)
+
+state <- st_read("karnataka.shp")
+
+ggplot() +
+  geom_sf(data = state, fill = "white", color = "black") +
+  geom_sf(data = zf_egret_df, aes(color = species_observed), size = 2) +
+  scale_color_manual(values = c("FALSE" = "grey", "TRUE" = "red"),
+                     labels = c("Absence", "Presence"),
+                     name = "Observation") +
+  theme_minimal() +
+  labs(title = "Presence–Absence of Eastern Cattle-egret in Bengaluru")
+
+
+```
